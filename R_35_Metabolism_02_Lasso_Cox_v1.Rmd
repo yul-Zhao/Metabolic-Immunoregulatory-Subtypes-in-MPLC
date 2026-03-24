@@ -1,0 +1,407 @@
+---
+title: "diff clusters in Macrophage cell"
+author: "Wei"
+date: '2025-07-09'
+output:
+html_document: default
+---
+
+# 1. loading library and function
+```{r}
+suppressPackageStartupMessages(library(tidyverse))
+suppressPackageStartupMessages(library(ggplot2))
+suppressPackageStartupMessages(library(ggrepel))
+suppressPackageStartupMessages(library(ggpubr))
+suppressPackageStartupMessages(library(ggpmisc))
+suppressPackageStartupMessages(library(OncoScience))
+options(dplyr.summarise.inform = FALSE)
+
+```
+
+# 2. Loading data
+```{r}
+clinical <- read_rds("/Users/xuewei/ZxProjects/LUAD/TCGA/01_Data/TCGA-LUAD.clinical_all_fixed.rds")
+LUAD.tpm <- read_rds("/Users/xuewei/ZxProjects/LUAD/TCGA/01_Data/TCGA-LUAD.tpm_clinical.rds")
+LUAD.group_type <- read_rds("/Users/xuewei/ZxProjects/LUAD/TCGA/01_Data/TCGA-LUAD.group_clinical.rds")
+# LUAD_OS <- read.csv("/Users/xuewei/ZeroData/projects/LUAD/TCGA/03_TCGA_OS/LUAD_TCGA_cox_gene_1_median.txt", sep="\t")
+candidate_gene <- read.csv("/Users/xuewei/ZzzData/20250601_SPLC_MPLC_scRNA/01_preprocessing_v2/35_Metabolism_Lasso_Cox_v4/Rds_01_join_DEGs_OS_p0.01.txt", sep = "\t", h = T, check.names = F)
+# candidate_gene <- read.csv("/Users/xuewei/ZzzData/20240530_CRC/01_preprocessing/51_Myeloid_Figure/Rds_01_DEG_v1.txt", sep = "\t", h = T, check.names = F)
+candidate_gene <- candidate_gene %>% 
+  filter(!str_detect(names, "^AC|^AL|^LINC"))
+
+```
+
+# 3. Data processing
+```{r}
+# 3.1 expression
+LUAD.tpm2 <- LUAD.tpm %>% 
+  rownames_to_column(var="sample")
+# LUAD.tpm3 <- as.data.frame(data.table::transpose(LUAD.tpm2, keep.names = "Gene_symbol", make.names = 1)) %>%
+#   column_to_rownames(var="Gene_symbol")
+
+# 3.2 select "Tumor" samples
+LUAD.group_type2 <- LUAD.group_type %>% 
+  select(sample, Group) %>% 
+  column_to_rownames(var="sample") %>% 
+  rownames_to_column(var = "sample")
+LUAD.clinical2 <- clinical %>% 
+  left_join(LUAD.group_type2, by = c('sample' = 'sample')) %>% 
+  select(sample, Group, sid:OS.time)
+LUAD.clinical2 <- na.omit(LUAD.clinical2)
+# add pid
+clinical.data <- LUAD.clinical2 %>% 
+  select(sample, sid, Group, OS.time, OS) %>% 
+  distinct()
+clinical.data$pid <- substr(clinical.data$sample, 1, 15)
+# select tumor
+clinical.data2 <- clinical.data %>% 
+  filter(str_detect(Group, "Tumor")) %>%
+  select(sample, pid, OS.time, OS)
+clinical.data3 <- clinical.data2 %>% 
+  select(sample, OS.time, OS)
+
+# 3.3 join TPM and OS
+LUAD.tpm3 <- left_join(LUAD.tpm2, clinical.data3, c("sample" = "sample")) %>% 
+  rename(sample_id = sample, time = OS.time, status = OS) %>% 
+  filter(!is.na(time)) %>% 
+  filter(!is.na(status))
+
+# 3.4 genelist
+LUAD.genelist <- candidate_gene$names
+
+# 3.5 sample_id
+LUAD.surv_samples <- LUAD.tpm3$sample
+
+```
+
+# 4. get_gene_surv
+## 4.1 function
+```{r}
+get_gene_surv <- function(genelist, expr_surv_data, surv_samples) {
+  surv_input <- expr_surv_data %>%
+    filter(sample_id %in% surv_samples) %>%
+    filter(!is.na(status)) %>%
+    filter(!is.na(time)) %>%
+    filter(time != 0)
+  express_genes <-
+    intersect(genelist, colnames(surv_input)[2:ncol(surv_input) - 2])
+  no_express <-
+    setdiff(genelist, colnames(surv_input)[2:ncol(surv_input) - 2])
+  print(paste0('input gene number: ', as.character(length(genelist))))
+  print(paste0('expressed gene number: ', as.character(length(express_genes))))
+  print(no_express)
+  gene_surv_input <- surv_input %>%
+    dplyr::select(sample_id, express_genes, time, status)
+  gene_surv_input$status <- as.numeric(gene_surv_input$status)
+  return(gene_surv_input)
+}
+
+```
+
+## 4.2 get gene for survival
+```{r}
+LUAD.gene_surv <- get_gene_surv(LUAD.genelist, LUAD.tpm3, LUAD.surv_samples)
+
+```
+
+# 5. Lasso_cox
+## 5.1 function
+```{r}
+lasso_cox <- function(data.mat) {
+  require(glmnet)
+  require(survival)
+  x <- data.mat[2:(ncol(data.mat) - 2)]
+  rownames(x) <- data.mat$sample
+  y <- Surv(data.mat$time, data.mat$status)
+  cvfit <- cv.glmnet(as.matrix(x), y, family = 'cox')
+  best_lam <- cvfit$lambda.min #最佳lambda取值
+  coef.min <- coef(cvfit, s = 'lambda.min')
+  #coef.1se <- coef(cvfit, s = 'lambda.1se')
+  sig.features.name <-
+    names(coef.min[, 1][which(as.numeric(coef.min) != 0)])
+  sig.features.coef <-
+    as.numeric(coef.min[, 1][which(as.numeric(coef.min) != 0)])
+  sig_df <-
+    data.frame(
+      gene = c(sig.features.name, 'min_lambda'),
+      coef = c(sig.features.coef, best_lam)
+    )
+  return(sig_df)
+  #sig.features.1se <- names(coef.1se[,1][which(as.numeric(coef.1se)!=0)])
+  #return(list(sig.features.min = sig.features.min, sig.features.1se = sig.features.1se))
+}
+
+```
+
+## 5.2 get gene for lasso_cox
+```{r}
+LUAD.lasso_cox <- lasso_cox(LUAD.gene_surv)
+write.table(LUAD.lasso_cox, file="Rds_02_Lasso_Cox_01_lasso_cox.txt", sep = "\t", quote=F, row.names = F)
+# delete min_lambda
+LUAD.lasso_res <- LUAD.lasso_cox %>% 
+  filter(gene != "min_lambda")
+write.table(LUAD.lasso_res, file="Rds_02_Lasso_Cox_02_lasso_res.txt", sep = "\t", quote=F, row.names = F)
+
+# LUAD.forest
+LUAD.forest <- LUAD.gene_surv %>% 
+  select(sample_id, LUAD.lasso_res$gene, time, status) %>% 
+  rename(OS = time, OS.status = status)
+# colnames(LUAD.forest)
+OS_uni_cox_result <- clicor_univariate_coxph_batch_statistics(
+    univariate_list = names(LUAD.forest)[2:6], # 根据LUAD.lasso_res修改 [2:10]
+    #univariate_cat=c("TNFRSF14","CD2","CCL5","TBX21","TIGIT","CXCL11","LAG3"),
+    df_clicor=LUAD.forest,
+    survival_col = "OS"
+)
+# singleGeneCox
+LUAD.singleGeneCox <- OS_uni_cox_result$result_table %>% 
+  select(univariate, HR, HR_lower, HR_upper, HR_pvalue)
+LUAD.singleGeneCox <- left_join(LUAD.singleGeneCox, LUAD.lasso_res, c("univariate" = "gene")) %>% 
+  rename(gene = univariate, coef = coef, HR = HR, lower = HR_lower, upper = HR_upper, PValue = HR_pvalue)
+
+  # mutate(PValue = case_when(PValue == "<0.001" ~ "0.001",
+  #                           TRUE ~ PValue
+  # ))
+write.table(LUAD.singleGeneCox, file="Rds_02_Lasso_Cox_03_singleGeneCox.txt", sep="\t", row.names=F, quote=F)
+
+```
+
+# 6. c_index
+## 6.1 function
+```{r}
+c_index <- function(genelist, gene_surv_data) {
+  require(survival)
+  FML <-
+    as.formula(paste0('Surv(time, status)~', paste(
+      paste0('`', genelist, '`'),
+      sep = '',
+      collapse = '+'
+    )))
+  multi_Cox <- coxph(FML, data = gene_surv_data)
+  c_ind <- multi_Cox$concordance['concordance']
+  if (c_ind >= 0.9) {
+    print(paste0('High accuracy: ', as.character(c_ind)))
+  } else{
+    if (c_ind < 0.9 & c_ind >= 0.7) {
+      print(paste0('Medium accuracy: ', as.character(c_ind)))
+    } else{
+      print(paste0('Low accuracy: ', as.character(c_ind)))
+    }
+  }
+}
+
+```
+
+## 6.2 get gene for c_index
+```{r}
+# LUAD.c_index <- c_index(LUAD.genelist, LUAD.gene_surv)
+
+```
+
+# 7. risk_group_surv
+## 7.1 function
+```{r}
+risk_group_surv <- function(lasso_res, gene_surv_input, cutoff) {
+  gene_surv_input1 <- gene_surv_input %>%
+    mutate(risk_score = eval(parse(text = paste(paste0('`',lasso_res$gene,'`'), lasso_res$coef, sep = '*', collapse = '+')))) %>% 
+    mutate(risk_group = ifelse(risk_score > as.numeric(quantile(risk_score, seq(0, 1, 0.05))[(100-cutoff)/5+1]), 'high_risk', 'low_risk'))
+  return(gene_surv_input1)
+}
+
+```
+
+## 7.2 run risk_group_surv
+```{r}
+LUAD.risk_group_surv <- risk_group_surv(LUAD.lasso_res, LUAD.gene_surv, 50)
+write.table(LUAD.risk_group_surv, file="Rds_02_Lasso_Cox_04_risk_group_surv.txt", sep = "\t", quote=F, row.names = F)
+
+```
+
+# 8. con_cut
+## 8.1 function
+```{r}
+con_cut <-
+  function(data,
+           y = c('time', 'status'),
+           con_var,
+           quan_seq = seq(0, 1, 0.05)) {
+    out = NULL
+    for (cut_off in quan_seq[2:(length(quan_seq) - 1)]) {
+      cut_data = data %>%
+        mutate(group = factor(
+          ifelse(
+            .data[[con_var]] < quantile(.data[[con_var]],
+                                        probs = cut_off,
+                                        na.rm = T),
+            'Low',
+            'High'
+          ),
+          levels = c('Low', 'High')
+        ))
+      cox_mod = coxph(as.formula(paste0('Surv(', y[1], ', ', y[2], ') ~ group')),
+                      data = cut_data)
+      out = rbind(
+        out,
+        data.frame(
+          cutoff = cut_off,
+          HR = summary(cox_mod)$coef[, 'exp(coef)'],
+          HR_lo = summary(cox_mod)$conf[, 'lower .95'],
+          HR_hi = summary(cox_mod)$conf[, 'upper .95'],
+          p = summary(cox_mod)$coef[, 'Pr(>|z|)']
+        )
+      )
+    }
+    ratio = diff(range(out$HR)) / diff(range(out$p))
+    # HR p value through cutoffs dual axis plot
+    HR_p_cutoff_plot = out %>%
+      ggplot(aes(x = cutoff, y = HR)) +
+      geom_line(color = 'dodgerblue', linetype = 'dashed') +
+      geom_line(aes(y = (p - min(p)) * ratio + min(HR)), color = 'red', linetype = 'dashed') +
+      geom_hline(yintercept = 1, color = 'dodgerblue') +
+      geom_hline(yintercept = (0.05 - min(out$p)) * ratio + min(out$HR),
+                 color = 'red') +
+      scale_y_continuous(sec.axis = sec_axis(
+        trans = ~ (. - min(out$HR)) / ratio + min(out$p),
+        name = 'p value'
+      )) +
+      theme_classic2() %+replace%
+      theme(
+        axis.line.y.left = element_line(color = 'dodgerblue'),
+        axis.line.y.right = element_line(color = 'red')
+      )
+    # HR CI through cutoffs plot
+    cut_off_labs = paste0(paste0('[0-', quan_seq[-c(1, length(quan_seq))], ']'),
+                          ' vs ',
+                          paste0('[', quan_seq[-c(1, length(quan_seq))], '-1]'))
+    HR_CI_cutoff_plot = out %>%
+      ggplot(aes(cutoff, HR)) +
+      geom_point() +
+      geom_errorbar(aes(ymin = HR_lo, ymax = HR_hi)) +
+      scale_x_continuous(breaks = quan_seq[-c(1, length(quan_seq))],
+                         labels = cut_off_labs) +
+      coord_flip() +
+      theme_classic2()
+    return(list(
+      tbl = out,
+      HR_p_plot = HR_p_cutoff_plot,
+      HR_CI_plot = HR_CI_cutoff_plot
+    ))
+  }
+
+```
+
+## 8.2 run for con_cut
+```{r}
+LUAD.con_cut <- con_cut(data = LUAD.risk_group_surv, con_var="risk_score")
+
+```
+
+# 9. risk_performance
+## 9.1 AUC
+```{r}
+suppressPackageStartupMessages(library(timeROC))
+source("/Users/xuewei/ZzzData/20250601_SPLC_MPLC_scRNA/01_preprocessing_v2/35_Metabolism_Lasso_Cox_v4/plotutil.time.AUC.R")
+# 
+# pdf("20250707_02_Lasso_Cox_03_AUC_plot_revised.pdf", height=6, width=6)
+# plotutil.time.AUC(df.surv = LUAD.risk_group_surv, 
+#                   surv.year = c(1,3,5), 
+#                   time.col = 'time', 
+#                   status.col = 'status', 
+#                   marker.var = 'risk_score', 
+#                   color.pal = c("#BC3C29FF", "#0072B5FF", "#E18727FF"))
+# dev.off()
+
+```
+
+## 9.2 function
+```{r}
+risk_performance <-
+  function(lasso_res,
+           gene_surv,
+           cutoff,
+           leg_pos = c(0.75, 0.15),
+           time_col = 'time',
+           status_col = 'status',
+           marker_var = 'risk_score') {
+    risk_surv <- risk_group_surv(lasso_res, gene_surv, cutoff)
+    #KM_p1 <- plotutil_OS_nyear_KM(risk_surv, 1, leg_pos = leg_pos)
+    #KM_p3 <- plotutil_OS_nyear_KM(risk_surv, 3, leg_pos = leg_pos)
+    KM_p5 <- plotutil_OS_nyear_KM(risk_surv, 5, leg_pos = leg_pos)
+    KM_p10 <- plotutil_OS_nyear_KM(risk_surv, 10, leg_pos = leg_pos)
+    AUC_p <- plotutil.time.AUC(risk_surv, 
+                               surv.year = c(1,3,5), 
+                               time.col = 'time',
+                               status.col = 'status', 
+                               marker.var = 'risk_score', 
+                               color.pal = c("#BC3C29FF", "#0072B5FF", "#E18727FF")
+                               )
+    return(
+      list(
+        risk_surv = risk_surv,
+        #KM_1year = KM_p1,
+        #KM_3year = KM_p3,
+        KM_5year = KM_p5,
+        KM_10year = KM_p10,
+        AUC_plot = AUC_p
+      )
+    )
+  }
+
+```
+
+## 9.3 run for risk_performance
+```{r}
+source("/Users/xuewei/ZzzData/20250601_SPLC_MPLC_scRNA/01_preprocessing_v2/35_Metabolism_Lasso_Cox_v4/Lasso_Cox_plotutil_v1.R")
+
+LUAD.risk_performance <- risk_performance(
+  lasso_res = LUAD.lasso_res, 
+  gene_surv = LUAD.gene_surv,
+  cutoff = 50
+  )
+
+pdf("20250707_02_Lasso_Cox_01_KM_5year.pdf", height=6, width=6)
+LUAD.risk_performance$KM_5year
+dev.off()
+
+pdf("20250707_02_Lasso_Cox_02_KM_10year.pdf", height=6, width=6)
+LUAD.risk_performance$KM_10year
+dev.off()
+
+pdf("20250707_02_Lasso_Cox_03_AUC_plot.pdf", height=6, width=6)
+LUAD.risk_performance$AUC_plot
+dev.off()
+
+```
+
+# 10. MultiCox
+## 10.1 function
+```{r}
+MultiCox <- function(x, data, multi_fac) {
+  require(survminer)
+  surv=Surv(time = data$time,event = data$status)
+  data$surv=with(data,surv)
+  fml=as.formula(paste0('surv~',paste0(c(x,multi_fac),collapse ="+")))
+  xCox=coxph(fml,data=data)
+  pf <- ggforest(xCox, data, cpositions= c(0.02, 0.15, 0.4))
+  xSum=summary(xCox)
+  HR=round(xSum$coefficients[,2],3)
+  PValue=round(xSum$coefficients[,5],3)
+  CI_mat=round(xSum$conf.int[,3:4],2)
+  CI=paste(CI_mat[,1],CI_mat[,2],sep="-")
+  logtest=as.numeric(xSum$logtest[3])
+  multicox_res=data.frame('Characteristics'=rownames(as.data.frame(HR)),'HR'=HR,'CI95'=CI,'PValue'=PValue,'Logtest'=logtest)
+  return(list(tbl = multicox_res, plot = pf))
+}
+
+```
+
+## 10.2 run for MultiCox
+```{r}
+LUAD.MultiCox <- MultiCox(
+  "risk_score",
+  data = LUAD.risk_group_surv,
+  multi_fac=c("STAM", "PTTG1")
+)
+
+```
+

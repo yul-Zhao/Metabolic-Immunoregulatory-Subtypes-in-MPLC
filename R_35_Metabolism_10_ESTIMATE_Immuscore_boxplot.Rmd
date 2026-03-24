@@ -1,0 +1,296 @@
+---
+title: "ESTIMATE immune score"
+author: "Wei"
+date: '2025-07-10'
+output:
+html_document: default
+---
+
+# 0. install.packages
+```{r}
+# # https://www.jianshu.com/p/0b1de1427458
+# library(utils)
+# rforge <- "http://r-forge.r-project.org"
+# install.packages("estimate", repos=rforge, dependencies=TRUE)
+# library(estimate)
+# help(package="estimate")
+
+```
+
+
+# 1. loading library and function
+```{r}
+suppressPackageStartupMessages(library(estimate))
+suppressPackageStartupMessages(library(ggplot2))
+suppressPackageStartupMessages(library(cowplot))
+suppressPackageStartupMessages(library(RColorBrewer))
+suppressPackageStartupMessages(library(ggbeeswarm))
+suppressPackageStartupMessages(library(pacman))
+pacman::p_load(tidyverse,ggpubr,rstatix,ggsci,ggsignif,reshape2)
+suppressPackageStartupMessages(library(tidyverse))
+options(dplyr.summarise.inform = FALSE)
+
+```
+
+# 2. loading data
+```{r}
+# TPM
+expr_data <- read_rds("/Users/xuewei/ZxProjects/LUAD/TCGA/01_Data/TCGA-LUAD.tpm_clinical.rds")
+#expr_data[1:3,1:3]
+
+# Group all (Normal and Tumor)
+Group_sample <- read_rds("/Users/xuewei/ZxProjects/LUAD/TCGA/01_Data/TCGA-LUAD.group_clinical.rds")
+
+# Group
+group_type <- read.table("/Users/xuewei/ZzzData/20250601_SPLC_MPLC_scRNA/01_preprocessing_v2/35_Metabolism_Lasso_Cox_v4/Rds_02_Lasso_Cox_04_risk_group_surv.txt", sep = "\t", h = T, check.names = F)
+
+```
+
+# 3. Data process
+## 3.1 select samples in TCGA-LUAD group_type
+```{r}
+# # select Tumor samples
+# Group_sample2 <- Group_sample %>% 
+#   filter(str_detect(Group, "Tumor"))
+
+# select sample in group_type
+group_type2 <- group_type %>% 
+  select(sample_id, risk_group) %>% 
+  mutate(Status = str_replace_all(risk_group, "high_risk", "High")) %>% 
+  mutate(Status = str_replace_all(Status, "low_risk", "Low")) %>% 
+  select(sample_id, Status)
+group_type_sid <- group_type2 %>% 
+  select(sample_id)
+
+# select expression of group_type samples
+expr_data2 <- expr_data %>% 
+  rownames_to_column(var = 'sample_id')
+expr_data3 <- semi_join(expr_data2, group_type_sid, c("sample_id" = "sample_id"))
+expr_data4 <- as.data.frame(data.table::transpose(expr_data3, keep.names = "sample_id", make.names = 1))
+expr_data4 <- expr_data4 %>% 
+  column_to_rownames(var = 'sample_id')
+
+```
+
+
+## 3.2 loading estimate function
+```{r}
+estimate <- function(dat, pro){
+  input.f=paste0(pro,'_estimate_input.txt')
+  output.f=paste0(pro,'_estimate_gene.gct')
+  output.ds=paste0(pro,'_estimate_score.gct')
+  write.table(dat, file = input.f, sep = '\t', quote = F)
+  library(estimate)
+  filterCommonGenes(input.f=input.f,
+                    output.f=output.f,
+                    id="GeneSymbol")
+  estimateScore(input.ds = output.f,
+                output.ds=output.ds,
+                platform="illumina")   ## 注意platform
+  scores=read.table(output.ds, skip = 2, header = T, check.names = F)
+  rownames(scores)=scores[,1]
+  scores=t(scores[,3:ncol(scores)])
+  return(scores)
+}
+
+```
+
+## 3.2 run estimate
+```{r}
+dat = expr_data4
+pro = 'LUAD'
+scores=estimate(dat, pro)
+saveRDS(scores, file = "EstimateScores.rds")
+# EstimateScores
+scores <- read_rds("/Users/xuewei/ZzzData/20250601_SPLC_MPLC_scRNA/01_preprocessing_v2/35_Metabolism_Lasso_Cox_v4/EstimateScores.rds")
+
+```
+
+## 3.3 TumorPurity
+```{r}
+TumorPurity = cos(0.6049872018+0.0001467884 * scores[,3])
+TumorPurity <- as.data.frame(TumorPurity) %>% 
+  rownames_to_column(var = 'sample_id') %>% 
+  mutate(sample_id = str_replace_all(sample_id, "[.]", "-"))
+#head(TumorPurity)
+# TumorPurity2 = TumorPurity2[match(names(TumorPurity),names(TumorPurity2))]
+# compare = cbind(TumorPurity,TumorPurity2)
+# round(compare,4)[1:10,]
+
+```
+
+# 4. join group and estimate score
+## 4.1 data pre-processing
+```{r}
+# estimate score
+EstimateScores <- as.data.frame(scores) %>% 
+  rownames_to_column(var = 'sample_id') %>% 
+  mutate(sample_id = str_replace_all(sample_id, "[.]", "-"))
+# add TumorPurity to EstimateScores
+EstimateScores <- left_join(EstimateScores, TumorPurity, by = c("sample_id" = "sample_id"))
+# Group only Tumor with OS Status
+Group_status <- group_type2 %>% 
+  select(sample_id, Status)
+# # Group all (Normal and Tumor)
+# Group_type_all <- Group_type_all %>% 
+#   rownames_to_column(var = 'sample_id')
+
+```
+
+## 4.2 join estimate and Group status
+```{r}
+# Group only Tumor with OS Status
+EstimateStatus <- Group_status %>% 
+  left_join(EstimateScores, by = c('sample_id' = 'sample_id'))
+# # Group all (Normal and Tumor)
+# EstimateStatus_all <- Group_type_all %>% 
+#   left_join(EstimateScores, by = c('Sample' = 'Sample'))
+
+```
+
+# 5. boxplot of estimate
+## 5.1 StromalScore boxplot ###
+```{r}
+boxplot_StromalScore <- data.frame(EstimateStatus) %>%
+  select(Status, StromalScore)
+boxplot_StromalScore$Status <- factor(boxplot_StromalScore$Status, levels=c("Low", "High"))
+
+pdf("20250710_Metabolism_10_ESTIMATE_m6A_LUAD_StromalScore_boxplot_v1.pdf",height=5,width=5)
+ggplot(boxplot_StromalScore,aes(x=Status,y=StromalScore,fill=factor(Status),color=factor(Status)))+
+  # geom_violin(width=0.45, size = 1)+
+  geom_boxplot(width=0.3, size = 1)+
+  scale_y_continuous(expand = ggplot2::expansion(mult = c(0.1, 0.1)))+
+  # geom_jitter(width=0.1)+
+  geom_signif(comparisons = list(c("Low", "High")),
+              map_signif_level=F,
+              textsize=4,test=wilcox.test,step_increase=0.1,color="#000000")+
+  annotate("text", x=1.33, y=median(boxplot_StromalScore[boxplot_StromalScore$Status=="Low",]$StromalScore), label=sprintf("%0.2f", median(boxplot_StromalScore[boxplot_StromalScore$Status=="Low",]$StromalScore)), color = "#000000", size = 5)+
+  annotate("text", x=2.37, y=median(boxplot_StromalScore[boxplot_StromalScore$Status=="High",]$StromalScore), label=sprintf("%0.2f", median(boxplot_StromalScore[boxplot_StromalScore$Status=="High",]$StromalScore)), color = "#000000", size = 5)+
+  #scale_y_log10()+
+  # ylim(-2500,1500)+
+  theme_classic()+theme(legend.position="NA")+
+  scale_fill_manual(values=c("#FFFFFF", "#FFFFFF"))+
+  scale_color_manual(values=c("#0f3a8a", "#ff6347"))+
+  labs(title = "Stromal score")+
+  theme(panel.grid = element_blank(),axis.title = element_text(size = 15))+
+  theme(plot.title = element_text(face="bold", color="black", size=20, hjust = 0.5))+
+  xlab(label = NULL)+ylab(label = "Stromal score")+
+  theme(axis.line=element_line(linewidth=0.5,colour="black"))+
+  theme(axis.ticks=element_line(linewidth=0.5,colour="black"),axis.ticks.length=unit(0.5,"lines"))+
+  theme(axis.text.x = element_text(face="bold", color="black", size=15),
+        axis.text.y = element_text(face="bold", color="black", size=15),
+        axis.title.x = element_text(face="bold", color="black", size=15),
+        axis.title.y = element_text(face="bold",color="black", size=15))
+dev.off()
+
+```
+
+## 5.2 ImmuneScore boxplot ###
+```{r}
+boxplot_ImmuneScore <- data.frame(EstimateStatus) %>%
+  select(Status, ImmuneScore)
+boxplot_ImmuneScore$Status <- factor(boxplot_ImmuneScore$Status, levels=c("Low", "High"))
+
+pdf("20250710_Metabolism_10_ESTIMATE_m6A_LUAD_ImmuneScore_boxplot_v1.pdf",height=5,width=5)
+ggplot(boxplot_ImmuneScore,aes(x=Status,y=ImmuneScore,fill=factor(Status),color=factor(Status)))+
+  #geom_violin(width=0.45, size = 1)+
+  geom_boxplot(width=0.3, size = 1)+
+  scale_y_continuous(expand = ggplot2::expansion(mult = c(0.1, 0.1)))+
+  # geom_jitter(width=0.1)+
+  geom_signif(comparisons = list(c("Low", "High")),
+              map_signif_level=F,
+              textsize=4,test=wilcox.test,step_increase=0.1,color="#000000")+
+  annotate("text", x=1.37, y=median(boxplot_ImmuneScore[boxplot_ImmuneScore$Status=="Low",]$ImmuneScore), label=sprintf("%0.2f", median(boxplot_ImmuneScore[boxplot_ImmuneScore$Status=="Low",]$ImmuneScore)), color = "#000000", size = 5)+
+  annotate("text", x=2.37, y=median(boxplot_ImmuneScore[boxplot_ImmuneScore$Status=="High",]$ImmuneScore), label=sprintf("%0.2f", median(boxplot_ImmuneScore[boxplot_ImmuneScore$Status=="High",]$ImmuneScore)), color = "#000000", size = 5)+
+  #scale_y_log10()+
+  #ylim(0,0.5)+
+  theme_classic()+theme(legend.position="NA")+
+  scale_fill_manual(values=c("#FFFFFF", "#FFFFFF"))+
+  scale_color_manual(values=c("#0f3a8a", "#ff6347"))+
+  labs(title = "Immune score")+
+  theme(panel.grid = element_blank(),axis.title = element_text(size = 15))+
+  theme(plot.title = element_text(face="bold", color="black", size=20, hjust = 0.5))+
+  xlab(label = NULL)+ylab(label = "Immune score")+
+  theme(axis.line=element_line(size=0.5,colour="black"))+
+  theme(axis.ticks=element_line(size=0.5,colour="black"),axis.ticks.length=unit(0.5,"lines"))+
+  theme(axis.text.x = element_text(face="bold", color="black", size=15),
+        axis.text.y = element_text(face="bold", color="black", size=15),
+        axis.title.x = element_text(face="bold", color="black", size=15),
+        axis.title.y = element_text(face="bold",color="black", size=15))
+dev.off()
+
+```
+
+## 5.3 EstimateStatus boxplot ###
+```{r}
+boxplot_ESTIMATEScore <- data.frame(EstimateStatus) %>%
+  select(Status, ESTIMATEScore)
+boxplot_ESTIMATEScore$Status <- factor(boxplot_ESTIMATEScore$Status, levels=c("Low", "High"))
+
+pdf("20250710_Metabolism_10_ESTIMATE_m6A_LUAD_ESTIMATEScore_boxplot_v1.pdf",height=5,width=5)
+ggplot(boxplot_ESTIMATEScore,aes(x=Status,y=ESTIMATEScore,fill=factor(Status),color=factor(Status)))+
+  #geom_violin(width=0.45, size = 1)+
+  geom_boxplot(width=0.3, size = 1)+
+  scale_y_continuous(expand = ggplot2::expansion(mult = c(0.1, 0.1)))+
+  # geom_jitter(width=0.1)+
+  geom_signif(comparisons = list(c("Low", "High")),
+              map_signif_level=F,
+              textsize=4,test=wilcox.test,step_increase=0.1,color="#000000")+
+  annotate("text", x=1.37, y=median(boxplot_ESTIMATEScore[boxplot_ESTIMATEScore$Status=="Low",]$ESTIMATEScore), label=sprintf("%0.2f", median(boxplot_ESTIMATEScore[boxplot_ESTIMATEScore$Status=="Low",]$ESTIMATEScore)), color = "#000000", size = 5)+
+  annotate("text", x=2.37, y=median(boxplot_ESTIMATEScore[boxplot_ESTIMATEScore$Status=="High",]$ESTIMATEScore), label=sprintf("%0.2f", median(boxplot_ESTIMATEScore[boxplot_ESTIMATEScore$Status=="High",]$ESTIMATEScore)), color = "#000000", size = 5)+
+  #scale_y_log10()+
+  # ylim(-4000,3500)+
+  theme_classic()+theme(legend.position="NA")+
+  scale_fill_manual(values=c("#FFFFFF", "#FFFFFF"))+
+  scale_color_manual(values=c("#0f3a8a", "#ff6347"))+
+  labs(title = "ESTIMATE score")+
+  theme(panel.grid = element_blank(),axis.title = element_text(size = 15))+
+  theme(plot.title = element_text(face="bold", color="black", size=20, hjust = 0.5))+
+  xlab(label = NULL)+ylab(label = "ESTIMATE score")+
+  theme(axis.line=element_line(size=0.5,colour="black"))+
+  theme(axis.ticks=element_line(size=0.5,colour="black"),axis.ticks.length=unit(0.5,"lines"))+
+  theme(axis.text.x = element_text(face="bold", color="black", size=15),
+        axis.text.y = element_text(face="bold", color="black", size=15),
+        axis.title.x = element_text(face="bold", color="black", size=15),
+        axis.title.y = element_text(face="bold",color="black", size=15))
+dev.off()
+
+```
+
+
+## 5.4 TumorPurity boxplot ###
+```{r}
+boxplot_TumorPurity <- data.frame(EstimateStatus) %>%
+  select(Status, TumorPurity)
+boxplot_TumorPurity$Status <- factor(boxplot_TumorPurity$Status, levels=c("Low", "High"))
+
+pdf("20250710_Metabolism_10_ESTIMATE_m6A_LUAD_TumorPurity_boxplot_v1.pdf",height=5,width=5)
+ggplot(boxplot_TumorPurity,aes(x=Status,y=TumorPurity,fill=factor(Status),color=factor(Status)))+
+  #geom_violin(width=0.45, size = 1)+
+  geom_boxplot(width=0.3, size = 1)+
+  scale_y_continuous(expand = ggplot2::expansion(mult = c(0.1, 0.1)))+
+  # geom_jitter(width=0.1)+
+  geom_signif(comparisons = list(c("Low", "High")),
+              map_signif_level=F,
+              textsize=4,test=wilcox.test,step_increase=0.1,color="#000000")+
+  annotate("text", x=1.28, y=median(boxplot_TumorPurity[boxplot_TumorPurity$Status=="Low",]$TumorPurity), label=sprintf("%0.2f", median(boxplot_TumorPurity[boxplot_TumorPurity$Status=="Low",]$TumorPurity)), color = "#000000", size = 5)+
+  annotate("text", x=2.28, y=median(boxplot_TumorPurity[boxplot_TumorPurity$Status=="High",]$TumorPurity), label=sprintf("%0.2f", median(boxplot_TumorPurity[boxplot_TumorPurity$Status=="High",]$TumorPurity)), color = "#000000", size = 5)+
+  #scale_y_log10()+
+  # ylim(0.5,1.05)+
+  theme_classic()+theme(legend.position="NA")+
+  scale_fill_manual(values=c("#FFFFFF", "#FFFFFF"))+
+  scale_color_manual(values=c("#0f3a8a", "#ff6347"))+
+  labs(title = "Tumor purity")+
+  theme(panel.grid = element_blank(),axis.title = element_text(size = 15))+
+  theme(plot.title = element_text(face="bold", color="black", size=20, hjust = 0.5))+
+  xlab(label = NULL)+ylab(label = "Tumor purity")+
+  theme(axis.line=element_line(size=0.5,colour="black"))+
+  theme(axis.ticks=element_line(size=0.5,colour="black"),axis.ticks.length=unit(0.5,"lines"))+
+  theme(axis.text.x = element_text(face="bold", color="black", size=15),
+        axis.text.y = element_text(face="bold", color="black", size=15),
+        axis.title.x = element_text(face="bold", color="black", size=15),
+        axis.title.y = element_text(face="bold",color="black", size=15))
+dev.off()
+
+```
+

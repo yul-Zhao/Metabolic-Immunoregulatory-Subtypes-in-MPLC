@@ -1,0 +1,153 @@
+---
+title: "TCR of copper related genes in LUAD"
+author: "LUAD"
+date: '2025-07-09'
+output:
+html_document: default
+---
+
+# 1. loading library and function
+```{r}
+suppressPackageStartupMessages(library(ggplot2))
+suppressPackageStartupMessages(library(cowplot))
+suppressPackageStartupMessages(library(RColorBrewer))
+suppressPackageStartupMessages(library(ggbeeswarm))
+suppressPackageStartupMessages(library(pacman))
+pacman::p_load(tidyverse,ggpubr,rstatix,ggsci,ggsignif,reshape2)
+suppressPackageStartupMessages(library(openxlsx))
+suppressPackageStartupMessages(library(tidyverse))
+options(dplyr.summarise.inform = FALSE)
+
+```
+
+# 2. loading data
+```{r}
+# LUAD TIDEscore
+score <- openxlsx::read.xlsx("/Users/xuewei/ZxProjects/LUAD/References/2018_Immunity_Immune_Landscape_Cancer_TableS1.xlsx", sheet = "PanImmune_MS", check.names = T)
+
+# Group
+group_type <- read.table("/Users/xuewei/ZzzData/20250601_SPLC_MPLC_scRNA/01_preprocessing_v2/35_Metabolism_Lasso_Cox_v4/Rds_02_Lasso_Cox_04_risk_group_surv.txt", sep = "\t", h = T, check.names = F)
+
+```
+
+# 3. Data process
+## 3.1 select samples in TCGA-LUAD group_type
+```{r}
+# # select Tumor samples
+# Group_sample2 <- Group_sample %>%
+#   filter(str_detect(Group, "Tumor"))
+
+# select sample in group_type
+group_type2 <- group_type %>%
+  select(sample_id, risk_group) %>%
+  mutate(Status = str_replace_all(risk_group, "high_risk", "High")) %>%
+  mutate(Status = str_replace_all(Status, "low_risk", "Low")) %>%
+  select(sample_id, Status)
+group_type2$pid <- substr(group_type2$sample_id, 1, 12)
+
+```
+
+## 3.2 join Group and TIDEscore
+```{r}
+score2 <- score %>% 
+  select(TCGA.Participant.Barcode, TCGA.Study, TCR.Shannon, TCR.Richness) %>% 
+  rename(pid = TCGA.Participant.Barcode, CancerType = TCGA.Study, TCRShannon = TCR.Shannon, TCRRichness = TCR.Richness)
+score3 <- score2 %>% 
+  left_join(group_type2, c("pid" = "pid"))
+score3 <- na.omit(score3)
+
+```
+
+## 3.3 TCRShannon, TCRRichness, M2, Exclusion and Dysfunction
+```{r}
+# TCR_score
+TCR_score <- score3 %>% 
+  select(sample_id, TCRShannon, TCRRichness, Status) %>% 
+  distinct()
+# TCRShannon
+summary(TCR_score[TCR_score$Status=="Low",]$TCRShannon)
+summary(TCR_score[TCR_score$Status=="High",]$TCRShannon)
+wilcox.test(TCR_score[TCR_score$Status=="Low",]$TCRShannon,TCR_score[TCR_score$Status=="High",]$TCRShannon, alternative = c("greater"))
+
+# TCRShannon
+summary(TCR_score[TCR_score$Status=="Low",]$TCRRichness)
+summary(TCR_score[TCR_score$Status=="High",]$TCRRichness)
+wilcox.test(TCR_score[TCR_score$Status=="Low",]$TCRRichness,TCR_score[TCR_score$Status=="High",]$TCRRichness, alternative = c("greater"))
+
+```
+
+
+# 4. boxplot of TCR_score
+## 4.1 TCRShannon
+```{r}
+TCR_score$Status <- factor(TCR_score$Status, levels=c("Low", "High"))
+
+pdf("20250710_Metabolism_12_TCR_score_TCRShannon_v1.pdf",height=5,width=5)
+ggplot(TCR_score,aes(x=Status,y=TCRShannon,fill=factor(Status),color=factor(Status)))+
+  geom_violin(width=0.45, linewidth=1)+
+  geom_boxplot(width=0.1, linewidth=1)+
+  scale_y_continuous(expand = ggplot2::expansion(mult = c(0.1, 0.1)))+
+  #geom_quasirandom(width=0.1)+
+  geom_signif(comparisons = list(c("Low", "High")),
+              map_signif_level=F,
+              textsize=6,
+              test=t.test,
+              step_increase=0.1,color="#000000")+
+  annotate("text", x=1.41, y=median(TCR_score[TCR_score$Status=="Low",]$TCRShannon), label=sprintf("%0.3f", median(TCR_score[TCR_score$Status=="Low",]$TCRShannon)), color = "#000000", size = 6)+
+  annotate("text", x=2.40, y=median(TCR_score[TCR_score$Status=="High",]$TCRShannon), label=sprintf("%0.3f", median(TCR_score[TCR_score$Status=="High",]$TCRShannon)), color = "#000000", size = 6)+
+  #scale_y_log10()+
+  # ylim(-0.21, 0.21)+
+  theme_classic()+theme(legend.position="NA")+
+  scale_fill_manual(values=c("#FFFFFF", "#FFFFFF"))+
+  scale_color_manual(values=c("#0f3a8a", "#ff6347"))+
+  labs(title = "TCR Shannon")+
+  theme(panel.grid = element_blank(),axis.title = element_text(size = 15))+
+  theme(plot.title = element_text(face="bold", color="black", size=20, hjust = 0.5))+
+  xlab(label = NULL)+ylab(label = "TCR Shannon Diversity index")+
+  theme(axis.line=element_line(linewidth=0.5,colour="black"))+
+  theme(axis.ticks=element_line(linewidth=0.5,colour="black"),axis.ticks.length=unit(0.5,"lines"))+
+  theme(axis.text.x = element_text(face="bold", color="black", size=15),
+        axis.text.y = element_text(face="bold", color="black", size=15),
+        axis.title.x = element_text(face="bold", color="black", size=15),
+        axis.title.y = element_text(face="bold",color="black", size=15))
+dev.off()
+
+```
+
+## 4.2 TCRRichness
+```{r}
+TCR_score$Status <- factor(TCR_score$Status, levels=c("Low", "High"))
+
+pdf("20250710_Metabolism_12_TCR_score_TCRRichness_v1.pdf",height=5,width=5)
+ggplot(TCR_score,aes(x=Status,y=TCRRichness,fill=factor(Status),color=factor(Status)))+
+  geom_violin(width=0.45, linewidth=1)+
+  geom_boxplot(width=0.1, linewidth=1)+
+  scale_y_continuous(expand = ggplot2::expansion(mult = c(0.1, 0.1)))+
+  #geom_quasirandom(width=0.1)+
+  geom_signif(comparisons = list(c("Low", "High")),
+              map_signif_level=F,
+              textsize=6,
+              test=t.test,
+              step_increase=0.1,
+              color="#000000")+
+  annotate("text", x=1.38, y=median(TCR_score[TCR_score$Status=="Low",]$TCRRichness), label=sprintf("%0.3f", median(TCR_score[TCR_score$Status=="Low",]$TCRRichness)), color = "#000000", size = 6)+
+  annotate("text", x=2.41, y=median(TCR_score[TCR_score$Status=="High",]$TCRRichness), label=sprintf("%0.3f", median(TCR_score[TCR_score$Status=="High",]$TCRRichness)), color = "#000000", size = 6)+
+  #scale_y_log10()+
+  # ylim(-0.15,0.36)+
+  theme_classic()+theme(legend.position="NA")+
+  scale_fill_manual(values=c("#FFFFFF", "#FFFFFF"))+
+  scale_color_manual(values=c("#0f3a8a", "#ff6347"))+
+  labs(title = "TCR Richness")+
+  theme(panel.grid = element_blank(),axis.title = element_text(size = 15))+
+  theme(plot.title = element_text(face="bold", color="black", size=20, hjust = 0.5))+
+  xlab(label = NULL)+ylab(label = "TCR Richness")+
+  theme(axis.line=element_line(size=0.5,colour="black"))+
+  theme(axis.ticks=element_line(size=0.5,colour="black"),axis.ticks.length=unit(0.5,"lines"))+
+  theme(axis.text.x = element_text(face="bold", color="black", size=15),
+        axis.text.y = element_text(face="bold", color="black", size=15),
+        axis.title.x = element_text(face="bold", color="black", size=15),
+        axis.title.y = element_text(face="bold",color="black", size=15))
+dev.off()
+
+```
+

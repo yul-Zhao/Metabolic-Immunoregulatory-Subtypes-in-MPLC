@@ -1,0 +1,378 @@
+---
+title: "TMEscore"
+author: "Wei"
+date: '2026-07-10'
+output:
+html_document: default
+---
+
+# 0.Installation
+The package is not yet on CRAN. You can install from Github:
+```{r}
+# # install.packages("devtools")
+# if (!requireNamespace("TMEscore", quietly = TRUE))
+#   devtools::install_github("DongqiangZeng0808/TMEscore")
+
+```
+
+# 1. loading library and function
+```{r}
+suppressPackageStartupMessages(library(ggplot2))
+suppressPackageStartupMessages(library(tidyverse))
+suppressPackageStartupMessages(library(cowplot))
+suppressPackageStartupMessages(library(RColorBrewer))
+suppressPackageStartupMessages(library(ggbeeswarm))
+suppressPackageStartupMessages(library(pacman))
+suppressPackageStartupMessages(library(TMEscore))
+pacman::p_load(tidyverse,ggpubr,rstatix,ggsci,ggsignif,reshape2)
+options(dplyr.summarise.inform = FALSE)
+
+```
+
+# 2. loading data
+## 2.1 input data
+```{r}
+# RNA fpkm
+expr_data <- read_rds("/Users/xuewei/ZxProjects/LUAD/TCGA/01_Data/TCGA-LUAD.tpm_clinical.rds")
+
+# Group all (Normal and Tumor)
+Group_sample <- read_rds("/Users/xuewei/ZxProjects/LUAD/TCGA/01_Data/TCGA-LUAD.group_clinical.rds")
+
+# Group
+group_type <- read.table("/Users/xuewei/ZzzData/20250601_SPLC_MPLC_scRNA/01_preprocessing_v2/35_Metabolism_Lasso_Cox_v4/Rds_02_Lasso_Cox_04_risk_group_surv.txt", sep = "\t", h = T, check.names = F)
+
+```
+
+## 2.2 join Group type and clinical
+```{r}
+# # select Tumor samples
+# Group_sample2 <- Group_sample %>% 
+#   filter(str_detect(Group, "Tumor"))
+
+# select sample in group_type
+group_type2 <- group_type %>% 
+  select(sample_id, risk_group) %>% 
+  mutate(Status = str_replace_all(risk_group, "high_risk", "High")) %>% 
+  mutate(Status = str_replace_all(Status, "low_risk", "Low")) %>% 
+  select(sample_id, Status)
+group_type_sid <- group_type2 %>% 
+  select(sample_id)
+
+```
+
+# 3. Expr
+## 3.1 expr_data_col and Group_all_join
+```{r}
+# select expression of group_type samples
+expr_data2 <- expr_data %>% 
+  rownames_to_column(var = 'sample_id')
+expr_data3 <- semi_join(expr_data2, group_type_sid, c("sample_id" = "sample_id"))
+expr_data4 <- as.data.frame(data.table::transpose(expr_data3, keep.names = "sample_id", make.names = 1))
+expr_data4 <- expr_data4 %>% 
+  column_to_rownames(var = 'sample_id')
+
+```
+## 3.3 OS input
+```{r}
+# # join Group
+# pdata_stad <- STAD.group_type3 %>% 
+#   select(Sample, Status, OS, OS.status)
+# # colnames
+# colnames(pdata_stad) <- c("ID", "subtype", "time", "status")
+
+```
+
+# 4. Usage
+## 4.1 Main documentation is on the `tmescore` function in the package:
+```{r}
+data_tmescore <- tmescore(eset     = expr_data4, #expression data
+                          pdata    = NULL, #phenotype data
+                          method   = "PCA", #default
+                          classify = T) #if true, survival data must be provided in pdata
+
+```
+
+## 4.2 boxplot
+```{r}
+#remove observation with missing value
+# data_tmescore <- data_tmescore[!is.na(data_tmescore$subtype),]
+data_tmescore <- data_tmescore %>% 
+  left_join(group_type2, by =c('ID' = 'sample_id'))
+
+```
+
+## 4.3 TMEscoreA
+```{r}
+wilcox.test(data_tmescore[data_tmescore$Status=="Low",]$TMEscoreA, data_tmescore[data_tmescore$Status=="High",]$TMEscoreA)
+t.test(data_tmescore[data_tmescore$Status=="Low",]$TMEscoreA, data_tmescore[data_tmescore$Status=="High",]$TMEscoreA)
+
+data_tmescore$Status = factor(data_tmescore$Status, levels=c('Low', 'High'))
+
+comparision <- combn(unique(as.character(data_tmescore$Status)), 2, simplify=F)
+
+plot_TMEscoreA <- ggplot(data_tmescore,aes(x=Status,y=TMEscoreA,fill=factor(Status),color=factor(Status)))+
+  geom_violin(width=0.45)+
+  geom_boxplot(width=0.1)+
+  scale_y_continuous(expand = ggplot2::expansion(mult = c(0.1, 0.1)))+
+  #geom_boxplot(notch = F,outlier.shape = 1,outlier.size = 0.5)+
+  scale_fill_manual(values= c("#FFFFFF","#FFFFFF"))+
+  scale_color_manual(values=c("#00468B", "#ED0100"))+
+  stat_compare_means(comparisons = comparision,
+                     size = 6,
+                     method = "wilcox.test")+
+  annotate("text", x=1.38, y=median(data_tmescore[data_tmescore$Status=="Low",]$TMEscoreA), label=sprintf("%0.2f", median(data_tmescore[data_tmescore$Status=="Low",]$TMEscoreA)), color = "#00468B", size = 6)+
+  annotate("text", x=2.35, y=median(data_tmescore[data_tmescore$Status=="High",]$TMEscoreA), label=sprintf("%0.2f", median(data_tmescore[data_tmescore$Status=="High",]$TMEscoreA)), color = "#ED0100", size = 6)+
+  theme_classic()+theme(legend.position="NA")+
+  labs(title = "TMEscoreA")+
+  theme(panel.grid = element_blank(),axis.title = element_text(size = 12))+
+  theme(plot.title = element_text(face="bold", color="black", size=20, hjust = 0.5))+
+  xlab(label = NULL)+ylab(label = "TMEscoreA")+
+  theme(axis.line=element_line(linewidth=0.5,colour="black"))+
+  theme(axis.ticks=element_line(linewidth=0.5,colour="black"),axis.ticks.length=unit(0.5,"lines"))+
+  theme(axis.text.x = element_text(face="bold", color="black", size=12),
+        axis.text.y = element_text(face="bold", color="black", size=12),
+        axis.title.x = element_text(face="bold", color="black", size=12),
+        axis.title.y = element_text(face="bold",color="black", size=12))
+ggsave("20250710_TMEscore_043_TMEscoreA_v1.png", plot_TMEscoreA, height=5, width=5, dpi = 300)
+
+```
+
+
+## 4.4 TMEscoreB
+```{r}
+wilcox.test(data_tmescore[data_tmescore$Status=="Low",]$TMEscoreB, data_tmescore[data_tmescore$Status=="High",]$TMEscoreB)
+t.test(data_tmescore[data_tmescore$Status=="Low",]$TMEscoreB, data_tmescore[data_tmescore$Status=="High",]$TMEscoreB)
+
+data_tmescore$Status = factor(data_tmescore$Status, levels=c('Low', 'High'))
+
+comparision <- combn(unique(as.character(data_tmescore$Status)), 2, simplify=F)
+
+plot_TMEscoreB <- ggplot(data_tmescore,aes(x=Status,y=TMEscoreB,fill=factor(Status),color=factor(Status)))+
+  geom_violin(width=0.45)+
+  geom_boxplot(width=0.1)+
+  scale_y_continuous(expand = ggplot2::expansion(mult = c(0.1, 0.1)))+
+  #geom_boxplot(notch = F,outlier.shape = 1,outlier.size = 0.5)+
+  scale_fill_manual(values= c("#FFFFFF","#FFFFFF"))+
+  scale_color_manual(values=c("#00468B", "#ED0100"))+
+  stat_compare_means(comparisons = comparision,
+                     size = 6,
+                     method = "wilcox.test")+
+  annotate("text", x=1.33, y=median(data_tmescore[data_tmescore$Status=="Low",]$TMEscoreB), label=sprintf("%0.2f", median(data_tmescore[data_tmescore$Status=="Low",]$TMEscoreB)), color = "#00468B", size = 6)+
+  annotate("text", x=2.39, y=median(data_tmescore[data_tmescore$Status=="High",]$TMEscoreB), label=sprintf("%0.2f", median(data_tmescore[data_tmescore$Status=="High",]$TMEscoreB)), color = "#ED0100", size = 6)+
+  theme_classic()+theme(legend.position="NA")+
+  labs(title = "TMEscoreB")+
+  theme(panel.grid = element_blank(),axis.title = element_text(size = 12))+
+  theme(plot.title = element_text(face="bold", color="black", size=20, hjust = 0.5))+
+  xlab(label = NULL)+ylab(label = "TMEscoreB")+
+  theme(axis.line=element_line(linewidth=0.5,colour="black"))+
+  theme(axis.ticks=element_line(linewidth=0.5,colour="black"),axis.ticks.length=unit(0.5,"lines"))+
+  theme(axis.text.x = element_text(face="bold", color="black", size=12),
+        axis.text.y = element_text(face="bold", color="black", size=12),
+        axis.title.x = element_text(face="bold", color="black", size=12),
+        axis.title.y = element_text(face="bold",color="black", size=12))
+ggsave("20250710_TMEscore_044_TMEscoreB_v1.png", plot_TMEscoreB, height=5, width=5, dpi = 300)
+
+```
+
+## 4.5 TMEscore
+```{r}
+wilcox.test(data_tmescore[data_tmescore$Status=="Low",]$TMEscore, data_tmescore[data_tmescore$Status=="High",]$TMEscore)
+t.test(data_tmescore[data_tmescore$Status=="Low",]$TMEscore, data_tmescore[data_tmescore$Status=="High",]$TMEscore)
+
+data_tmescore$Status = factor(data_tmescore$Status, levels=c('Low', 'High'))
+
+comparision <- combn(unique(as.character(data_tmescore$Status)), 2, simplify=F)
+
+plot_TMEscore <- ggplot(data_tmescore,aes(x=Status,y=TMEscore,fill=factor(Status),color=factor(Status)))+
+  geom_violin(width=0.45)+
+  geom_boxplot(width=0.1)+
+  scale_y_continuous(expand = ggplot2::expansion(mult = c(0.1, 0.1)))+
+  #geom_boxplot(notch = F,outlier.shape = 1,outlier.size = 0.5)+
+  scale_fill_manual(values= c("#FFFFFF","#FFFFFF"))+
+  scale_color_manual(values=c("#00468B", "#ED0100"))+
+  stat_compare_means(comparisons = comparision,
+                     size = 6,
+                     method = "wilcox.test")+
+  annotate("text", x=1.39, y=median(data_tmescore[data_tmescore$Status=="Low",]$TMEscore), label=sprintf("%0.2f", median(data_tmescore[data_tmescore$Status=="Low",]$TMEscore)), color = "#00468B", size = 6)+
+  annotate("text", x=2.33, y=median(data_tmescore[data_tmescore$Status=="High",]$TMEscore), label=sprintf("%0.2f", median(data_tmescore[data_tmescore$Status=="High",]$TMEscore)), color = "#ED0100", size = 6)+
+  theme_classic()+theme(legend.position="NA")+
+  labs(title = "TMEscore")+
+  theme(panel.grid = element_blank(),axis.title = element_text(size = 12))+
+  theme(plot.title = element_text(face="bold", color="black", size=20, hjust = 0.5))+
+  xlab(label = NULL)+ylab(label = "TMEscore")+
+  theme(axis.line=element_line(linewidth=0.5,colour="black"))+
+  theme(axis.ticks=element_line(linewidth=0.5,colour="black"),axis.ticks.length=unit(0.5,"lines"))+
+  theme(axis.text.x = element_text(face="bold", color="black", size=12),
+        axis.text.y = element_text(face="bold", color="black", size=12),
+        axis.title.x = element_text(face="bold", color="black", size=12),
+        axis.title.y = element_text(face="bold",color="black", size=12))
+ggsave("20250710_TMEscore_045_TMEscore_v1.png", plot_TMEscore, height=5, width=5, dpi = 300)
+
+```
+
+
+# 5. pheatmap
+```{r}
+suppressPackageStartupMessages(library(pheatmap))
+
+Status_status <- group_type2 %>%
+  distinct()
+Status_status_sid <- Status_status %>% 
+  select(sample_id)
+
+expr_data_col <- expr_data4 %>%
+  rownames_to_column(var = 'Sample')
+
+```
+
+## 5.1 TMEscoreA TPM
+```{r}
+TMEscoreA_sig <- data.frame(Gene_symbol =c("GBP5", "IDO1", "WARS", "CXCL10", "CXCL11", "CXCL9", "GZMB", "IFNG", "GBP4", "CD8A", "CCL5", "GNLY", "CCL4", "KLRC2", "UBD", "ETV7", "TAP1", "PSAT1", "CDT1", "BRIP1", "DTL", "ZNF367", "HELLS", "RCC1", "KIF18A"))
+TMEscoreA_TPM <- expr_data_col %>%
+  semi_join(TMEscoreA_sig, by = c('Sample' = 'Gene_symbol'))
+TMEscoreA_TPM <- as.data.frame(data.table::transpose(TMEscoreA_TPM, keep.names = "Sample", make.names = 1)) %>%
+  left_join(Status_status, by = c('Sample' = 'sample_id')) %>% 
+  semi_join(Status_status_sid, by = c('Sample' = 'sample_id'))
+
+# TMEscoreA_TPM_TTN_mut and top30
+TMEscoreA_TPM_TTN_mut <- TMEscoreA_TPM %>%
+  filter(str_detect(Status, "High")) %>%
+  select(-Status) %>%
+  column_to_rownames(var="Sample")
+# select top30 of rowMean TPM
+TMEscoreA_TPM_TTN_mut <- TMEscoreA_TPM_TTN_mut %>%
+  mutate(rowMean = rowMeans(TMEscoreA_TPM_TTN_mut)) %>%
+  dplyr::slice_max(n = 50, order_by = rowMean) %>%
+  rownames_to_column(var="Sample") %>%
+  select(-rowMean)
+
+# TMEscoreA_TPM_TTN_wt and top30
+TMEscoreA_TPM_TTN_wt <- TMEscoreA_TPM %>%
+  filter(str_detect(Status, "Low")) %>%
+  select(-Status) %>%
+  column_to_rownames(var="Sample")
+# select top30 of rowMean TPM
+TMEscoreA_TPM_TTN_wt <- TMEscoreA_TPM_TTN_wt %>%
+  mutate(rowMean = rowMeans(TMEscoreA_TPM_TTN_wt)) %>%
+  dplyr::slice_min(n = 50, order_by = rowMean) %>%
+  rownames_to_column(var="Sample") %>%
+  select(-rowMean)
+
+```
+
+## 5.2 pheatmap of TMEscoreA
+```{r}
+TMEscoreA_TPM_pheatmap <- rbind(TMEscoreA_TPM_TTN_mut, TMEscoreA_TPM_TTN_wt)
+TMEscoreA_TPM_Status <- TMEscoreA_TPM_pheatmap %>%
+  left_join(Status_status, by = c('Sample' = 'sample_id')) %>%
+  select(Sample, Status)
+
+# annotation_row
+annotation_row = data.frame(
+  Status = factor(TMEscoreA_TPM_Status$Status)
+)
+
+rownames(annotation_row) = TMEscoreA_TPM_pheatmap$Sample
+
+annotation_row$Status=factor(annotation_row$Status, levels=c("Low", "High"))
+
+data_tmescoreA_pheatmap <- TMEscoreA_TPM_pheatmap %>%
+  column_to_rownames(var = "Sample")
+zscore_TMEscoreA_pheatmap <- scale(data_tmescoreA_pheatmap)
+
+# annotation_colors
+ann_colors = list(
+  Status = c('Low' = "#00468B", 'High' = "#ED0100")
+)
+
+pdf("20250710_STAD_pheatmap_TMEscoreA_v1.pdf",height=6,width=6)
+pheatmap(zscore_TMEscoreA_pheatmap,
+         main = "TMEscoreA (Immune) signature genes",
+         #color = colorRampPalette(c("#005792","#FFFFFF","#f6003c"))(100)[0:100],
+         fontsize=9, fontsize_row=9,
+         #display_numbers = matrix(ifelse(plot_CIBERSORT2_zscore > 1, "*", ""), nrow(plot_CIBERSORT2_zscore)),
+         breaks = seq(-4,4,1/10), legend_breaks = seq(-4,4,2),
+         annotation_row = annotation_row,
+         show_rownames = F,
+         annotation_colors = ann_colors,
+         cluster_rows=F, cluster_cols=T)
+dev.off()
+
+```
+
+
+## 5.3 TMEscoreB TPM
+```{r}
+TMEscoreB_sig <- data.frame(Gene_symbol =c("PLEKHH2", "MCC", "FILIP1", "PRICKLE2", "MAMDC2", "MIR100HG", "TNS1", "ZCCHC24", "JAM3", "C14orf132", "CRYAB", "MXRA7", "TGFBI1", "ANTXR2", "PAPLN", "SYNPO", "PROS1", "Sample1", "MCEMP1"))
+TMEscoreB_TPM <- expr_data_col %>%
+  semi_join(TMEscoreB_sig, by = c('Sample' = 'Gene_symbol'))
+TMEscoreB_TPM <- as.data.frame(data.table::transpose(TMEscoreB_TPM, keep.names = "Sample", make.names = 1)) %>%
+  left_join(Status_status, by = c('Sample' = 'sample_id')) %>% 
+  semi_join(Status_status_sid, by = c('Sample' = 'sample_id'))
+
+# TMEscoreB_TPM_TTN_mut and top30
+TMEscoreB_TPM_TTN_mut <- TMEscoreB_TPM %>%
+  filter(str_detect(Status, "High")) %>%
+  select(-Status) %>%
+  column_to_rownames(var="Sample")
+# select top30 of rowMean TPM
+TMEscoreB_TPM_TTN_mut <- TMEscoreB_TPM_TTN_mut %>%
+  mutate(rowMean = rowMeans(TMEscoreB_TPM_TTN_mut)) %>%
+  dplyr::slice_min(n = 50, order_by = rowMean) %>%
+  rownames_to_column(var="Sample") %>%
+  select(-rowMean)
+
+# TMEscoreB_TPM_TTN_wt and top30
+TMEscoreB_TPM_TTN_wt <- TMEscoreB_TPM %>%
+  filter(str_detect(Status, "Low")) %>%
+  select(-Status) %>%
+  column_to_rownames(var="Sample")
+# select top30 of rowMean TPM
+TMEscoreB_TPM_TTN_wt <- TMEscoreB_TPM_TTN_wt %>%
+  mutate(rowMean = rowMeans(TMEscoreB_TPM_TTN_wt)) %>%
+  dplyr::slice_max(n = 50, order_by = rowMean) %>%
+  rownames_to_column(var="Sample") %>%
+  select(-rowMean)
+
+```
+
+## 5.4 pheatmap of TMEscoreB
+```{r}
+TMEscoreB_TPM_pheatmap <- rbind(TMEscoreB_TPM_TTN_mut, TMEscoreB_TPM_TTN_wt)
+TMEscoreB_TPM_Status <- TMEscoreB_TPM_pheatmap %>%
+  left_join(Status_status, by = c('Sample' = 'sample_id')) %>%
+  select(Sample, Status)
+
+# annotation_row
+annotation_row = data.frame(
+  Status = factor(TMEscoreB_TPM_Status$Status)
+)
+
+rownames(annotation_row) = TMEscoreB_TPM_pheatmap$Sample
+
+annotation_row$Status=factor(annotation_row$Status, levels=c("Low", "High"))
+
+data_tmescoreB_pheatmap <- TMEscoreB_TPM_pheatmap %>%
+  column_to_rownames(var = "Sample")
+zscore_TMEscoreB_pheatmap <- scale(data_tmescoreB_pheatmap)
+
+# annotation_colors
+ann_colors = list(
+  Status = c('Low' = "#00468B", 'High' = "#ED0100")
+)
+
+pdf("20250710_STAD_pheatmap_TMEscoreB_v1.pdf",height=6,width=6)
+pheatmap(zscore_TMEscoreB_pheatmap,
+         main = "TMEscoreB (Stromal) signature genes",
+         #color = colorRampPalette(c("#005792","#ffeead","#f6003c"))(100)[0:100],
+         fontsize=9, fontsize_row=9,
+         #display_numbers = matrix(ifelse(plot_CIBERSORT2_zscore > 1, "*", ""), nrow(plot_CIBERSORT2_zscore)),
+         breaks = seq(-4,4,1/10), legend_breaks = seq(-4,4,2),
+         annotation_row = annotation_row,
+         show_rownames = F,
+         annotation_colors = ann_colors,
+         cluster_rows=F, cluster_cols=T)
+dev.off()
+
+```
+

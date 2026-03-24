@@ -1,0 +1,127 @@
+ ---
+title: "diff clusters in Monocytes"
+author: "Wei"
+date: '2025-07-07'
+output:
+html_document: default
+---
+
+# 1. loading library and function
+```{r}
+suppressPackageStartupMessages(library(tidyverse))
+suppressPackageStartupMessages(library(ggplot2))
+suppressPackageStartupMessages(library(ggrepel))
+suppressPackageStartupMessages(library(ggpubr))
+suppressPackageStartupMessages(library(ggpmisc))
+options(dplyr.summarise.inform = FALSE)
+
+```
+
+# 2. loading data
+## 2.1 LUAD_OS
+```{r}
+LUAD_OS <- read.csv("/Users/xuewei/ZxProjects/LUAD/TCGA/03_TCGA_OS/LUAD_TCGA_cox_gene_1_median.txt", sep="\t")
+
+```
+
+## 2.2 IOBR geneset
+```{r}
+# 加载所需的包
+library(IOBR)
+
+# 获取signature_collection数据
+data("signature_collection")
+
+# 提取所有代谢相关基因集
+metabolism_sets <- signature_collection[grep("metab|Metab|KEGG", names(signature_collection))]
+
+# 选择指定的5个代谢通路
+selected_pathways <- c(
+  "Arginine_and_Proline_Metabolism",
+  "Beta_Alanine_Metabolism",
+  "Histidine_Metabolism",
+  "Selenocompound_Metabolism",
+  "Glycine__Serine_and_Threonine_Metabolism"
+)
+
+# 提取这些通路的基因集
+selected_sets <- metabolism_sets[names(metabolism_sets) %in% selected_pathways]
+
+# 确保每个基因集都是一个字符向量
+selected_sets <- lapply(selected_sets, as.character)
+
+# (1) 单独保存每个代谢通路的基因集（5个txt文件）
+for (pathway in names(selected_sets)) {
+  # 创建数据框，列名为"names"
+  df <- data.frame(names = selected_sets[[pathway]])
+  
+  # 保存为txt文件，文件名使用通路名称
+  write.table(
+    df,
+    file = paste0("IOBR_", pathway, "_genes.txt"),
+    sep = "\t",
+    row.names = FALSE,
+    col.names = TRUE,
+    quote = FALSE
+  )
+}
+
+# (2) 合并所有5个通路的基因集，并保存为一个文件
+# 创建一个空的数据框用于合并
+combined_df <- data.frame(names = character(), Pathway = character())
+
+# 遍历每个通路，合并基因和通路信息
+for (pathway in names(selected_sets)) {
+  genes <- selected_sets[[pathway]]
+  temp_df <- data.frame(names = genes, Pathway = pathway)
+  combined_df <- rbind(combined_df, temp_df)
+}
+
+# 保存合并后的文件
+write.table(
+  combined_df,
+  file = "IOBR_metabolism_geneset.txt",
+  sep = "\t",
+  row.names = FALSE,
+  col.names = TRUE,
+  quote = FALSE
+)
+
+# 输出信息
+message("以下代谢通路的基因集已单独保存为txt文件:")
+print(names(selected_sets))
+message("\n合并后的基因集已保存为: IOBR_metabolism_geneset.txt")
+
+```
+
+
+# 3. data processing
+## 3.1 selcet significant OS genes
+```{r}
+# p.value < 0.05
+LUAD_OS2 <- LUAD_OS %>% 
+  filter(HR > 1.0 & p.value < 0.05)
+
+# p.value < 0.01
+LUAD_OS3 <- LUAD_OS %>% 
+  filter(HR > 1.0 & p.value < 0.01)
+
+```
+
+## 3.2 join DEGs and OS genes
+```{r}
+combined_df_geneid <- combined_df %>% 
+  select(names)
+
+# p.value < 0.05
+join_DEGs_OS2 <- left_join(combined_df_geneid, LUAD_OS2, by = c("names" = "gene")) %>% 
+  filter(!is.na(HR))
+write.table(join_DEGs_OS2, file="Rds_01_join_DEGs_OS_p0.05.txt", sep = "\t", quote=F, row.names = F)
+
+# p.value < 0.01
+join_DEGs_OS3 <- left_join(combined_df_geneid, LUAD_OS3, by = c("names" = "gene")) %>% 
+  filter(!is.na(HR))
+write.table(join_DEGs_OS3, file="Rds_01_join_DEGs_OS_p0.01.txt", sep = "\t", quote=F, row.names = F)
+
+```
+

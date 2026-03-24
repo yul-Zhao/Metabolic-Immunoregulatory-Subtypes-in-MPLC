@@ -1,0 +1,471 @@
+---
+title: "TCGA COAD Group by Sig1 gene sets (TCGAbiolinks)"
+author: "Wei"
+date: '2025-07-09'
+output:
+html_document: default
+---
+
+# 1. loading library
+```{r}
+suppressPackageStartupMessages(library(DESeq2))
+suppressPackageStartupMessages(library(dplyr))
+suppressPackageStartupMessages(library(org.Hs.eg.db))
+suppressPackageStartupMessages(library(tibble))
+suppressPackageStartupMessages(library(clusterProfiler))
+suppressPackageStartupMessages(library(enrichplot))
+suppressPackageStartupMessages(library(ggplot2))
+suppressPackageStartupMessages(library(tidyverse))
+options(dplyr.summarise.inform = FALSE)
+
+```
+
+# 2. loading data
+```{r}
+group_type <- read.table("/Users/xuewei/ZzzData/20250601_SPLC_MPLC_scRNA/01_preprocessing_v2/35_Metabolism_Lasso_Cox_v4/Rds_02_Lasso_Cox_04_risk_group_surv.txt", sep = "\t", h = T, check.names = F)
+sample_info <- data.table::fread("/Users/xuewei/ZuDatabase/tcga/LUAD/TCGAbiolinks/TCGAbiolinks_LUAD_sample.info.tsv.gz")
+LUAD_counts <- read_rds("/Users/xuewei/ZuDatabase/tcga/LUAD/TCGAbiolinks/TCGAbiolinks_LUAD_counts.rds")
+
+```
+
+
+# 3. Data process
+## 3.1 join Group type and clinical
+```{r}
+group_type <- group_type %>% 
+  select(sample_id, risk_group) %>% 
+  mutate(Status = str_replace_all(risk_group, "high_risk", "High")) %>% 
+  mutate(Status = str_replace_all(Status, "low_risk", "Low")) %>% 
+  dplyr::select(sample_id, Status)
+
+
+# clinical (select Primary pid)
+sample_info2 <- sample_info %>% 
+  dplyr::select(barcode, sample)
+# sample_info2$pid <- substr(sample_info2$sample,1,15)
+
+sample_group <- left_join(group_type, sample_info2, by = c("sample_id" = "sample")) %>% 
+  dplyr::select(barcode, Status) %>% 
+  filter(!duplicated(barcode))
+
+sample_group <- na.omit(sample_group)
+
+```
+
+## 3.2 htseq_count
+```{r}
+htseq_count <- LUAD_counts %>% 
+  as.matrix()
+
+```
+
+## 3.3 calculate DEGs with DEseq2
+```{r}
+deseq2_exp <- htseq_count %>% 
+  as.data.frame() %>%
+  rownames_to_column(var = "Gene") %>%
+  dplyr::select(Gene, sample_group$barcode)
+
+dds <- DESeqDataSetFromMatrix(countData = deseq2_exp, 
+                              colData = sample_group, 
+                              design = ~ Status,
+                              tidy = TRUE)
+
+nrow(dds)
+ncol(dds)
+# rownames(dds)[1:10]
+dds <- dds[rowSums(counts(dds))>1,]
+# vsd <- vst(dds, blind = FALSE)
+# sampleDists <- dist(t(assay(vsd)))
+dds <- DESeq(dds, parallel = T)
+#saveRDS(dds, file = "DESeq2_dds.rds")
+
+```
+
+## 3.4 plotMA
+```{r}
+contrast <- c("Status", "High", "Low")
+dd1 <- results(dds, contrast=contrast, alpha = 0.05)
+#plotMA(dd1, ylim=c(-2,2))
+
+```
+
+# 4. KEGG
+## 4.1 result and geneList
+```{r}
+res <- dd1 %>% data.frame() %>% rownames_to_column("gene_id")
+saveRDS(res, file = "Rds_08_DESeq2_res.rds")
+# res <- read_rds("Rds_08_DESeq2_res.rds")
+DEGs_up <- res %>% filter(log2FoldChange > 1 & padj < 0.05) %>% distinct(gene_id)
+DEGs_down <- res %>% filter(log2FoldChange < -1 & padj < 0.05) %>% distinct(gene_id)
+DEGs_all <- res %>% filter(abs(log2FoldChange) > 1 & padj < 0.05) %>% distinct(gene_id)
+saveRDS(DEGs_up, file = "Rds_08_DESeq2_res_up.rds")
+saveRDS(DEGs_down, file = "Rds_08_DESeq2_res_down.rds")
+saveRDS(DEGs_all, file = "Rds_08_DESeq2_res_all.rds")
+
+```
+
+## 4.2 loading data
+```{r}
+res <- read_rds("Rds_08_DESeq2_res.rds")
+DEGs_up <- read_rds("Rds_08_DESeq2_res_up.rds")
+DEGs_down <- read_rds("Rds_08_DESeq2_res_down.rds")
+DEGs_all <- read_rds("Rds_08_DESeq2_res_all.rds")
+
+```
+
+## 4.3 geneList
+```{r}
+res$entrez <- mapIds(org.Hs.eg.db,
+                     keys=res$gene_id,
+                     column="ENTREZID",
+                     keytype="SYMBOL",
+                     multiVals="first")
+
+gene_df <- res %>% 
+  # filter(padj <= 0.05,abs(log2FoldChange) >= 1) %>%
+  dplyr::select(gene_id, log2FoldChange, gene_id, entrez) %>% 
+  ## 去掉NA
+  filter(entrez!="NA") %>% 
+  ## 去掉重复
+  distinct(entrez,.keep_all = T)
+
+geneList <- gene_df$log2FoldChange
+## 命名
+names(geneList) = gene_df$entrez
+geneList = sort(geneList, decreasing = TRUE)
+
+```
+
+## 4.4 gseKEGG
+```{r}
+KEGG <- gseKEGG(geneList = geneList,
+                organism = "hsa",
+                use_internal_data = T,
+                pvalueCutoff = 1)
+#gseaplot2(KEGG, "hsa04010", pvalue_table = TRUE, ES_geom = "line")
+
+write.table(KEGG, file="Rds_08_KEGG1_gseKEGG_v1.txt", sep = "\t", quote=F, row.names = F)
+
+pdf("20250709_08_KEGG_gseaplot2_v1.pdf",width = 8, height = 6)
+gseaplot2(KEGG, 1:10, pvalue_table = TRUE, color=c("#6A00A3","#9464FF","#0064FF"), ES_geom = "line")
+dev.off()
+
+pdf("20250709_08_KEGG_dotplot_v1.pdf", width = 7, height = 6)
+dotplot(KEGG,showCategory=20,title="KEGG analysis of all DEGs") +
+  scale_color_gradientn(colours=c("#FF0000", "#FFCCCC"), guide=guide_colorbar(reverse=TRUE, order=1)) +
+  guides(size = guide_legend(override.aes=list(shape=1))) +
+  theme_bw()+
+  theme(axis.text.x=element_text(angle=0, size=NULL, hjust = 0.5)) +
+  theme(axis.text.y=element_text(angle=0, size=NULL, hjust = 1)) +
+  theme(axis.ticks=element_line(size=0.5, colour="black"),axis.ticks.length=unit(0.5, "lines"))
+dev.off()
+
+
+# 循环生成每个pathway的GSEA plot
+for (i in 1:20) {
+  # 设置输出PDF文件名称
+  pdf_filename <- paste0("20250709_08_KEGG_gseaplot2_", i, ".pdf")
+  
+  pdf(file = pdf_filename, width = 8, height = 6)
+  plot <- gseaplot2(KEGG, geneSetID = i, pvalue_table = TRUE, color = c("#6A00A3", "#9464FF", "#0064FF"), ES_geom = "line")
+  print(plot)
+  dev.off()
+  
+  # 检查文件是否生成成功
+  if (file.exists(pdf_filename)) {
+    print(paste("Successfully saved:", pdf_filename))
+  } else {
+    print(paste("Failed to save:", pdf_filename))
+  }
+}
+
+```
+
+## 4.5 entrezID2geneSymbol
+```{r}
+entrezID2geneSymbol <- function(entrezID){
+  entrezID <-  as.vector(str_split(entrezID,"/",simplify = T))
+  # ENTREZID转换为SYMBOL，返回向量
+  SYMBOL <- bitr(entrezID,"ENTREZID","SYMBOL",org.Hs.eg.db)[,"SYMBOL"]
+  # 再SYMBOL合并为字符串，并返回结果
+  SYMBOL_chr <- paste0(SYMBOL,"",collapse ="/")
+  return(SYMBOL_chr)
+}
+
+KEGG@result$gene_name <- unlist(map(KEGG@result$core_enrichment, entrezID2geneSymbol))
+
+write.table(KEGG, file="Rds_08_KEGG1_gseKEGG_v2.txt", sep = "\t", quote=F, row.names = F)
+
+```
+
+
+# 5. GSEA by hallmark gmt_genes
+```{r}
+gmt_genes <- geneList
+names(gmt_genes) <- gene_df$gene_id
+# h.all.v2023.2.Hs.symbols.gmt
+pathway2<-read.gmt("/Users/xuewei/ZuDatabase/GSEA/h.all.v2023.2.Hs.symbols.gmt")
+KEGG2 <- GSEA(gmt_genes, TERM2GENE = pathway2, pvalueCutoff = 1, eps = 0)
+write.table(KEGG2, file="Rds_08_KEGG2_hallmark_v1.txt", sep = "\t", quote=F, row.names = F)
+
+dotplot(KEGG2, showCategory=30, color="pvalue", orderBy = "x")
+
+pdf("20250709_08_GSEA_KEGG2_hallmark_pathways_dotplot_v1.pdf",width = 8,height = 6)
+dotplot(KEGG2,showCategory=20,title="") +
+  scale_color_gradientn(colours=c("#dc143c", "#fcdae0"), guide=guide_colorbar(reverse=TRUE, order=1)) +
+  guides(size = guide_legend(override.aes=list(shape=1))) +
+  theme_bw()+
+  theme(axis.text.x=element_text(angle=0, size=NULL, hjust = 0.5)) +
+  theme(axis.text.y=element_text(angle=0, size=NULL, hjust = 1)) +
+  theme(axis.ticks=element_line(size=0.5,colour="black"),axis.ticks.length=unit(0.5,"lines"))
+dev.off()
+
+
+
+# 循环生成每个pathway的GSEA plot
+for (i in 1:50) {
+  # 设置输出PDF文件名称
+  pdf_filename <- paste0("20250709_08_KEGG2_gseaplot2_", i, ".pdf")
+  
+  pdf(file = pdf_filename, width = 8, height = 6)
+  plot <- gseaplot2(KEGG2, geneSetID = i, pvalue_table = TRUE, color = "#dc143c", ES_geom = "line")
+  print(plot)
+  dev.off()
+  
+  # 检查文件是否生成成功
+  if (file.exists(pdf_filename)) {
+    print(paste("Successfully saved:", pdf_filename))
+  } else {
+    print(paste("Failed to save:", pdf_filename))
+  }
+}
+
+# read KEGGs
+# KEGG2 <- read.table(
+#   file = "Rds_08_KEGG2_hallmark_v1.txt",  # 文件路径
+#   sep = "\t",                             # 分隔符（与写入时一致）
+#   header = TRUE,                          # 第一行为列名
+#   quote = "",                             # 禁用引号解析（与quote=F对应）
+#   stringsAsFactors = FALSE                # 避免自动转换字符为因子
+# )
+
+```
+
+
+## 5.1 gseaplot2 HALLMARK_TGF_BETA_SIGNALING
+```{r}
+pdf("20250709_08_GSEA_KEGG2_HALLMARK_TGF_BETA_SIGNALING_v1.pdf", width = 9, height = 6)
+# pvalue_table = TRUE
+gseaplot2(KEGG2, 43,
+          pvalue_table = FALSE,
+          ES_geom = "line",
+          color = "#d33f6a", #dc143c
+          title = "HALLMARK_TGF_BETA_SIGNALING",
+          base_size = 12,
+          subplots = 1:3,
+          rel_heights = c(1.5, 0.5, 1))
+dev.off()
+
+```
+
+## 5.2 gseaplot2 HALLMARK_WNT_BETA_CATENIN_SIGNALING
+```{r}
+pdf("20250709_08_GSEA_KEGG2_HALLMARK_WNT_BETA_CATENIN_SIGNALING_v1.pdf",width = 9, height = 6)
+gseaplot2(KEGG2, 48,
+          pvalue_table = FALSE,
+          ES_geom = "line", 
+          color = "#d33f6a",
+          title = "HALLMARK_WNT_BETA_CATENIN_SIGNALING", 
+          base_size = 12, 
+          subplots = 1:3, 
+          rel_heights = c(1.5, 0.5, 1))
+dev.off()
+
+```
+
+## 5.3 gseaplot2 HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION
+```{r}
+pdf("20250709_08_GSEA_KEGG2_HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION_v1.pdf",width = 9,height = 6)
+gseaplot2(KEGG2,12,pvalue_table = FALSE,ES_geom = "line", color = "#d33f6a",title = "HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION", base_size = 12, subplots = 1:3, rel_heights = c(1.5, 0.5, 1))
+dev.off()
+
+```
+
+## 5.4 gseaplot2 HALLMARK_INTERFERON_ALPHA_RESPONSE
+```{r}
+pdf("20250709_08_GSEA_KEGG2_HALLMARK_INTERFERON_ALPHA_RESPONSE_v1.pdf",width = 9,height = 6)
+gseaplot2(KEGG2,40,pvalue_table = FALSE,ES_geom = "line", color = "#d33f6a",title = "HALLMARK_INTERFERON_ALPHA_RESPONSE", base_size = 12, subplots = 1:3, rel_heights = c(1.5, 0.5, 1))
+dev.off()
+
+```
+
+## 5.5 gseaplot2 HALLMARK_IL6_JAK_STAT3_SIGNALING
+```{r}
+pdf("20250709_08_GSEA_KEGG2_HALLMARK_IL6_JAK_STAT3_SIGNALING_v1.pdf",width = 9,height = 6)
+gseaplot2(KEGG2,41,pvalue_table = FALSE,ES_geom = "line", color = "#d33f6a",title = "HALLMARK_IL6_JAK_STAT3_SIGNALING", base_size = 12, subplots = 1:3, rel_heights = c(1.5, 0.5, 1))
+dev.off()
+
+```
+
+## 5.6 gseaplot2 HALLMARK_PI3K_AKT_MTOR_SIGNALING
+```{r}
+pdf("20250709_08_GSEA_KEGG2_HALLMARK_PI3K_AKT_MTOR_SIGNALING_v1.pdf",width = 9,height = 6)
+gseaplot2(KEGG2,38,pvalue_table = FALSE,ES_geom = "line", color = "#d33f6a",title = "HALLMARK_PI3K_AKT_MTOR_SIGNALING", base_size = 12, subplots = 1:3, rel_heights = c(1.5, 0.5, 1))
+dev.off()
+
+```
+
+## 5.7 gseaplot2 HALLMARK_MTORC1_SIGNALING
+```{r}
+pdf("20250709_08_GSEA_KEGG2_HALLMARK_MTORC1_SIGNALING_v1.pdf",width = 9,height = 6)
+gseaplot2(KEGG2,6,pvalue_table = FALSE,ES_geom = "line", color = "#d33f6a",title = "HALLMARK_MTORC1_SIGNALING", base_size = 12, subplots = 1:3, rel_heights = c(1.5, 0.5, 1))
+dev.off()
+
+```
+
+## 5.8 gseaplot2 HALLMARK_NOTCH_SIGNALING
+```{r}
+pdf("20250709_08_GSEA_KEGG2_HALLMARK_NOTCH_SIGNALING_v1.pdf",width = 9,height = 6)
+gseaplot2(KEGG2,47,pvalue_table = FALSE,ES_geom = "line", color = "#d33f6a",title = "HALLMARK_NOTCH_SIGNALING", base_size = 12, subplots = 1:3, rel_heights = c(1.5, 0.5, 1))
+dev.off()
+
+```
+
+## 5.9 gseaplot2 HALLMARK_HYPOXIA
+```{r}
+pdf("20250709_08_GSEA_KEGG2_HALLMARK_HYPOXIA_v1.pdf",width = 9,height = 6)
+gseaplot2(KEGG2,3,pvalue_table = FALSE,ES_geom = "line", color = "#d33f6a",title = "HALLMARK_HYPOXIA", base_size = 12, subplots = 1:3, rel_heights = c(1.5, 0.5, 1))
+dev.off()
+
+```
+
+
+## 5.10 gseaplot2 HALLMARK_HEME_METABOLISM
+```{r}
+pdf("20250709_08_GSEA_KEGG2_HALLMARK_HEME_METABOLISM_v1.pdf",width = 9,height = 6)
+gseaplot2(KEGG2,8,pvalue_table = FALSE,ES_geom = "line", color = "#d33f6a",title = "HALLMARK_HEME_METABOLISM", base_size = 12, subplots = 1:3, rel_heights = c(1.5, 0.5, 1))
+dev.off()
+
+```
+
+## 5.10 gseaplot2 HALLMARK_XENOBIOTIC_METABOLISM
+```{r}
+pdf("20250709_08_GSEA_KEGG2_HALLMARK_XENOBIOTIC_METABOLISM_v1.pdf",width = 9,height = 6)
+gseaplot2(KEGG2,6,pvalue_table = FALSE,ES_geom = "line", color = "#d33f6a",title = "HALLMARK_XENOBIOTIC_METABOLISM", base_size = 12, subplots = 1:3, rel_heights = c(1.5, 0.5, 1))
+dev.off()
+
+```
+
+
+## 5.11 gseaplot2 HALLMARK_FATTY_ACID_METABOLISM
+```{r}
+pdf("20250709_08_GSEA_KEGG2_HALLMARK_FATTY_ACID_METABOLISM_v1.pdf",width = 9,height = 6)
+gseaplot2(KEGG2,25,pvalue_table = FALSE,ES_geom = "line", color = "#d33f6a",title = "HALLMARK_FATTY_ACID_METABOLISM", base_size = 12, subplots = 1:3, rel_heights = c(1.5, 0.5, 1))
+dev.off()
+
+```
+
+## 5.12 gseaplot2 HALLMARK_BILE_ACID_METABOLISM
+```{r}
+pdf("20250709_08_GSEA_KEGG2_HALLMARK_BILE_ACID_METABOLISM_v1.pdf",width = 9,height = 6)
+gseaplot2(KEGG2,34,pvalue_table = FALSE,ES_geom = "line", color = "#d33f6a",title = "HALLMARK_BILE_ACID_METABOLISM", base_size = 12, subplots = 1:3, rel_heights = c(1.5, 0.5, 1))
+dev.off()
+
+```
+
+
+# 6. GSEA by canonical pathways gmt_genes
+```{r}
+# c2.cp.v2023.2.Hs.symbols.gmt
+pathway3 <- read.gmt("/Users/xuewei/ZuDatabase/GSEA/c2.cp.v2023.2.Hs.symbols.gmt")
+
+pathway3 <- pathway3 %>% 
+  filter(!str_detect(term, "BIOCARTA_")) %>% 
+  # filter(!str_detect(term, "KEGG_")) %>%
+  filter(!str_detect(term, "PID_")) %>% 
+  filter(!str_detect(term, "NABA_")) %>% 
+  filter(!str_detect(term, "WP_")) %>% 
+  filter(!str_detect(term, "SA_")) %>% 
+  filter(!str_detect(term, "SIG_")) %>% 
+  mutate(term = str_replace_all(term, "REACTOME_", "")) %>% 
+  filter(nchar(term) <= 50)
+  # mutate(nchar=nchar(term))
+  
+
+KEGG3 <- GSEA(gmt_genes, TERM2GENE = pathway3, pvalueCutoff = 1, eps = 0)
+write.table(KEGG3, file="Rds_08_KEGG3_canonical_pathways_v1.txt", sep = "\t", quote=F, row.names = F)
+
+dotplot(KEGG3, showCategory=30, color="pvalue", orderBy = "x")
+
+pdf("20250709_08_GSEA_KEGG3_canonical_pathways_dotplot_v1.pdf",width = 9, height = 6)
+dotplot(KEGG3,showCategory=20,title="GO enrichment analysis of all DEGs") +
+  scale_color_gradientn(colours=c("#FF0000", "#fd5f00"), guide=guide_colorbar(reverse=TRUE, order=1)) +
+  guides(size = guide_legend(override.aes=list(shape=1))) +
+  theme_bw()+
+  theme(axis.text.x=element_text(angle=0, size=NULL, hjust = 0.5)) +
+  theme(axis.text.y=element_text(angle=0, size=NULL, hjust = 1)) +
+  theme(axis.ticks=element_line(size=0.5,colour="black"),axis.ticks.length=unit(0.5,"lines"))
+dev.off()
+
+```
+
+## 6.1 gseaplot2 KEGG_TGF_BETA_SIGNALING_PATHWAY
+```{r}
+# pdf("20250709_08_GSEA_KEGG3_TGF_BETA_SIGNALING_PATHWAY_v1.pdf",width = 9,height = 6)
+# gseaplot2(KEGG3,227,pvalue_table = TRUE,ES_geom = "line", color = "#7B3B8C",title = "KEGG_TGF_BETA_SIGNALING_PATHWAY", base_size = 12, subplots = 1:3, rel_heights = c(1.5, 0.5, 1))
+# dev.off()
+
+```
+
+## 6.2 gseaplot2 REACTOME_TGF_BETA_RECEPTOR_SIGNALING_IN_EMT_EPITHELIAL_TO_MESENCHYMAL_TRANSITION
+```{r}
+# pdf("20250709_08_GSEA_canonical_pathways_REACTOME_TGF_BETA_RECEPTOR_SIGNALING_IN_EMT_EPITHELIAL_TO_MESENCHYMAL_TRANSITION_v1.pdf",width = 9,height = 6)
+# gseaplot2(KEGG3,1246,pvalue_table = TRUE,ES_geom = "line", color = "#7B3B8C",title = "REACTOME_TGF_BETA_RECEPTOR_SIGNALING_IN_EMT_EPITHELIAL_TO_MESENCHYMAL_TRANSITION", base_size = 12, subplots = 1:3, rel_heights = c(1.5, 0.5, 1))
+# dev.off()
+
+```
+
+## 6.3 gseaplot2 WNT_SIGNALING
+```{r}
+# pdf("20250709_08_GSEA_canonical_pathways_KEGG3_PID_WNT_SIGNALING_v1.pdf",width = 9,height = 6)
+# gseaplot2(KEGG3,109,pvalue_table = TRUE,ES_geom = "line", color = "#7B3B8C",title = "WNT_SIGNALING", base_size = 12, subplots = 1:3, rel_heights = c(1.5, 0.5, 1))
+# dev.off()
+
+```
+
+# 7. GSEA by c7.immunesigdb.v2023.2.Hs.symbols.gmt gmt_genes
+```{r}
+# c7.immunesigdb.v2023.2.Hs.symbols.gmt
+pathway4 <- read.gmt("/Users/xuewei/ZuDatabase/GSEA/c7.immunesigdb.v2023.2.Hs.symbols.gmt")
+
+pathway4 <- pathway4 %>% 
+  filter(!str_detect(term, "BIOCARTA_")) %>% 
+  # filter(!str_detect(term, "KEGG_")) %>%
+  filter(!str_detect(term, "PID_")) %>% 
+  filter(!str_detect(term, "NABA_")) %>% 
+  filter(!str_detect(term, "WP_")) %>% 
+  filter(!str_detect(term, "SA_")) %>% 
+  filter(!str_detect(term, "SIG_")) %>% 
+  mutate(term = str_replace_all(term, "REACTOME_", "")) %>% 
+  filter(nchar(term) <= 50)
+  # mutate(nchar=nchar(term))
+  
+
+KEGG4 <- GSEA(gmt_genes, TERM2GENE = pathway4, pvalueCutoff = 1, eps = 0)
+write.table(KEGG3, file="Rds_08_KEGG4_immunesigdb_v1.txt", sep = "\t", quote=F, row.names = F)
+
+dotplot(KEGG4, showCategory=30, color="pvalue", orderBy = "x")
+
+pdf("20250709_08_GSEA_KEGG4_immunesigdb_dotplot_v1.pdf",width = 9, height = 6)
+dotplot(KEGG4,showCategory=20,title="GO enrichment analysis of all DEGs") +
+  scale_color_gradientn(colours=c("#FF0000", "#fd5f00"), guide=guide_colorbar(reverse=TRUE, order=1)) +
+  guides(size = guide_legend(override.aes=list(shape=1))) +
+  theme_bw()+
+  theme(axis.text.x=element_text(angle=0, size=NULL, hjust = 0.5)) +
+  theme(axis.text.y=element_text(angle=0, size=NULL, hjust = 1)) +
+  theme(axis.ticks=element_line(size=0.5,colour="black"),axis.ticks.length=unit(0.5,"lines"))
+dev.off()
+
+```
+

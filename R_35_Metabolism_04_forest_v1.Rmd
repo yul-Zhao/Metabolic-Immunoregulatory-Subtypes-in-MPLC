@@ -1,0 +1,96 @@
+ ---
+title: "diff clusters in Myeloid cell"
+author: "Wei"
+date: '2025-07-09'
+output:
+html_document: default
+---
+
+# 1. loading library and function
+```{r}
+suppressPackageStartupMessages(library(tidyverse))
+suppressPackageStartupMessages(library(ggplot2))
+suppressPackageStartupMessages(library(forestplot))
+suppressPackageStartupMessages(library(readxl))
+suppressPackageStartupMessages(library(dplyr))
+suppressPackageStartupMessages(library(tibble))
+suppressPackageStartupMessages(library(tidyr))
+suppressPackageStartupMessages(library(readr))
+options(dplyr.summarise.inform = FALSE)
+
+```
+
+# 2. Loading data
+```{r}
+lasso_res <- read.csv("/Users/xuewei/ZzzData/20250601_SPLC_MPLC_scRNA/01_preprocessing_v2/35_Metabolism_Lasso_Cox_v4/Rds_02_Lasso_Cox_03_singleGeneCox.txt", sep = "\t", h = T, check.names = F)
+# lasso_res <- readxl::read_xlsx('/Users/xuewei/ZeroData/scripts/R_BNR/Cell_death_Rscript/lasso_HR.xlsx')
+
+lasso_res <- lasso_res %>%
+  filter(gene != "OS")
+
+```
+
+# 3. plot function input
+```{r}
+# 1. 直接使用原始 PValue 值（不转换数值）
+pvalue_formatted <- ifelse(
+  is.na(lasso_res$PValue),  # 处理 NA 值
+  "", 
+  lasso_res$PValue          # 直接使用原始字符串
+)
+
+# 2. 构建 tabletext（确保列名对齐）
+tabletext <- cbind(
+  c("Gene", lasso_res$gene),
+  c("Coefficient", sprintf("%.3f", as.numeric(lasso_res$coef))),
+  c("p-value", pvalue_formatted),  # 直接显示 "<0.001" 或 "0.025"
+  c("HR", sprintf("%.3f", as.numeric(lasso_res$HR)))
+)
+
+# 3. 构建 cochrane_from_rmeta（动态行数）
+cochrane_from_rmeta <- structure(
+  list(
+    mean  = c(NA, lasso_res$HR),
+    lower = c(NA, lasso_res$lower),
+    upper = c(NA, lasso_res$upper)
+  ),
+  .Names = c("mean", "lower", "upper"),
+  row.names = c(NA, -(nrow(lasso_res) + 1L)),
+  class = "data.frame"
+)
+
+```
+
+# 4. plot forest
+```{r}
+fp1 <- forestplot(
+  tabletext,
+  cochrane_from_rmeta,
+  new_page = FALSE,
+  is.summary = c(TRUE, rep(FALSE, nrow(lasso_res))),  # 标题加粗
+  zero = 1,  # 参考线位置
+  colgap = grid::unit(4, "mm"),
+  line.margin = grid::unit(4, "mm"),
+  lwd.ci = 3,  # 置信区间线宽
+  ci.vertices = TRUE,
+  ci.vertices.height = 0.2,
+  xlab = "Hazard ratio",
+  hrzl_lines = list("2" = grid::gpar(lty = 1)),  # 顶部横线
+  col = fpColors(
+    box = "#f46d43",  # 点估计方框颜色
+    lines = "#1c61b6",  # 置信区间线颜色
+    summary = "royalblue"
+  ),
+  txt_gp = fpTxtGp(
+    label = gpar(cex = 0.9),
+    ticks = gpar(cex = 1.0),  # 修改此处，从0.7增大到1.0
+    xlab = gpar(cex = 0.9, fontface = "bold")
+  )
+)
+
+pdf("20250709_04_AM_forest_v1.pdf", height=6, width=9)
+print(fp1)
+dev.off()
+
+```
+

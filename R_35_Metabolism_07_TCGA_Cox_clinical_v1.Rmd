@@ -1,0 +1,90 @@
+---
+title: "Cox of samples in TCGA-COAD"
+author: "Wei"
+date: '2025-07-09'
+output:
+html_document: default
+---
+
+# 1. loading library and function
+```{r}
+suppressPackageStartupMessages(library(ggplot2))
+suppressPackageStartupMessages(library(ggpubr))
+suppressPackageStartupMessages(library(survminer))
+suppressPackageStartupMessages(library(survival))
+suppressPackageStartupMessages(library(tidyverse))
+suppressPackageStartupMessages(library(forestplot))
+options(dplyr.summarise.inform = FALSE)
+
+```
+
+# 2. loading data
+```{r}
+# Sig1 Group
+Group_type <- read.table("/Users/xuewei/ZzzData/20250601_SPLC_MPLC_scRNA/01_preprocessing_v2/35_Metabolism_Lasso_Cox_v4/Rds_02_Lasso_Cox_04_risk_group_surv.txt", sep = "\t", h = T, check.names = F)
+Group_clinical <- read_rds("/Users/xuewei/ZxProjects/LUAD/TCGA/01_Data/TCGA-LUAD.group_clinical.rds")
+
+```
+
+# 3. Data process
+## 3.1 Group_type
+```{r}
+Group_type2 <- Group_type %>% 
+  select(sample_id, risk_group) %>% 
+  rename(Status = risk_group) %>% 
+  mutate(Status = str_replace_all(Status, "high_risk", "High")) %>% 
+  mutate(Status = str_replace_all(Status, "low_risk", "Low"))
+
+```
+
+## 3.2 Clinical
+```{r}
+# add pid
+Group_clinical$pid <- substr(Group_clinical$sample, 1, 15)
+# select
+Group_clinical2 <- Group_clinical %>% 
+  select(sample, pid, OS, OS.time, Age, Gender, Stage, Group) %>% 
+  rename(sample_id = sample, OS.status = OS, OS = OS.time)
+Group_clinical2 <- na.omit(Group_clinical2)
+
+```
+
+## 3.2 join clinical and group
+```{r}
+join_clinical <- Group_clinical2 %>% 
+  right_join(Group_type2, by = c('sample_id' = 'sample_id'))
+join_clinical <- na.omit(join_clinical)
+
+```
+
+# 5. ggforest of GSVA
+## 5.1 ggforest 
+```{r}
+join_clinical$Gender = factor(join_clinical$Gender, levels=c('Female', 'Male'))
+join_clinical$Stage = factor(join_clinical$Stage, levels=c('Stage I', 'Stage II', 'Stage III', 'Stage IV'))
+join_clinical$Status = factor(join_clinical$Status, levels=c('Low', 'High'))
+
+pdf("20250709_07_Sig1_Cox_ggforest_v1.pdf", height=6, width=6)
+ggforest(coxph(Surv(OS, OS.status) ~ Status + Age + Gender + Stage, data = join_clinical))
+dev.off()
+
+```
+
+## 5.2 ggforest age ≥ 65
+```{r}
+join_clinical$Age <- ifelse(join_clinical$Age > 65, ">65", "<=65")
+
+pdf("20250709_07_Sig1_Cox_ggforest_v2.pdf", height=6, width=6)
+ggforest(coxph(Surv(OS, OS.status) ~ Status + Age + Gender + Stage, data = join_clinical))
+dev.off()
+
+# ggforest(coxph(Surv(OS, OS.status) ~ SumZscore + age + gender + Stage2,
+#                data = join_clinical %>%
+#                  mutate(SumZscore = factor(
+#                    ifelse(SumZscore > quantile(SumZscore, probs = .75, na.rm = T),
+#                           'High',
+#                           'Low'),
+#                  levels = c('Low', 'High'))))) # top 1/4 vs bottom 3/4
+
+```
+
